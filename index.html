@@ -32,7 +32,7 @@
 
   <div id="start" class="overlay">
     <div class="panel">
-      <h1>Breakout Reveal</h1>
+      <h1>Breakout Reveal <small style="font-size:60%;opacity:.7">build r3</small></h1>
       <p>前面画像を“ブロック”として壊すと、背面の画像が現れます（1ステージ）。</p>
       <p class="kbd">操作：マウス/タッチでパドル移動、<kbd>スペース</kbd>でボール発射</p>
       <p style="margin-top:10px">画像ファイルを用意してください：<br><b>assets/front.jpg</b>（前面） と <b>assets/back.jpg</b>（背面）<br>※同じ比率推奨。PNGでも可（名前だけ合わせればOK）。</p>
@@ -53,8 +53,18 @@
     'use strict';
 
     // ====== Config ======
-    const IMG_FRONT_CANDIDATES = ['assets/front.jpg','front.jpg','assets/front.png','front.png'];
-    const IMG_BACK_CANDIDATES  = ['assets/back.jpg','back.jpg','assets/back.png','back.png'];
+    const IMG_FRONT_CANDIDATES = [
+      'assets/front.jpg','front.jpg','assets/front.png','front.png',
+      'images/front.png','images/front.jpg',
+      '../assets/front.png','../assets/front.jpg',
+      '/block/assets/front.png','/block/assets/front.jpg','/block/front.png','/block/front.jpg'
+    ];
+    const IMG_BACK_CANDIDATES  = [
+      'assets/back.jpg','back.jpg','assets/back.png','back.png',
+      'images/back.png','images/back.jpg',
+      '../assets/back.png','../assets/back.jpg',
+      '/block/assets/back.png','/block/assets/back.jpg','/block/back.png','/block/back.jpg'
+    ];
 
     const ROWS = 8, COLS = 14;      // ブロック数
     const BRICK_MARGIN = 0;         // 各ブロック間の隙間（見た目には使わず、当たり判定/破壊領域として）
