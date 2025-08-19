@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>Breakout Reveal – 1 Stage</title>
+  <style>
+    :root{ --fg:#eaf2ff; --muted:#a6b3c6; --accent:#79d3ff; --danger:#ff6a7a; --bg0:#0b0e14; }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{margin:0;background:#0b0e14;color:var(--fg);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans JP",Hiragino Kaku Gothic ProN,Meiryo}
+    canvas{display:block;width:100vw;height:100vh;touch-action:none;-webkit-tap-highlight-color:transparent}
+
+    /* HUD */
+    #hud{position:fixed;inset:10px auto auto 10px;display:flex;gap:10px;z-index:5}
+    .chip{backdrop-filter:blur(8px);background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);padding:8px 10px;border-radius:12px}
+    #pauseBtn,#startBtn,#againBtn{cursor:pointer;border:none;padding:10px 14px;border-radius:12px;background:rgba(255,255,255,.1);color:var(--fg)}
+
+    .overlay{position:fixed;inset:0;display:grid;place-items:center;z-index:10;padding:24px}
+    .panel{width:min(640px,92vw);text-align:center;border-radius:18px;padding:22px;background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.14)}
+    h1{margin:0 0 6px}
+    p{margin:.3em 0;color:var(--muted)}
+    .hidden{display:none!important}
+    .kbd kbd{background:rgba(0,0,0,.35);padding:4px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.15)}
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="Breakout game canvas"></canvas>
+  <div id="hud">
+    <div class="chip">SCORE <b id="score">0</b> ｜ LIVES <b id="lives">3</b></div>
+  </div>
+
+  <div id="start" class="overlay">
+    <div class="panel">
+      <h1>Breakout Reveal</h1>
+      <p>前面画像を“ブロック”として壊すと、背面の画像が現れます（1ステージ）。</p>
+      <p class="kbd">操作：マウス/タッチでパドル移動、<kbd>スペース</kbd>でボール発射</p>
+      <p style="margin-top:10px">画像ファイルを用意してください：<br><b>assets/front.jpg</b>（前面） と <b>assets/back.jpg</b>（背面）<br>※同じ比率推奨。PNGでも可（名前だけ合わせればOK）。</p>
+      <button id="startBtn">スタート</button>
+    </div>
+  </div>
+
+  <div id="over" class="overlay hidden">
+    <div class="panel">
+      <h1 id="overTitle">Game Over</h1>
+      <p>Score: <b id="finalScore">0</b></p>
+      <button id="againBtn">もう一度</button>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    'use strict';
+
+    // ====== Config ======
+    const IMG_FRONT_CANDIDATES = ['assets/front.jpg','front.jpg','assets/front.png','front.png'];
+    const IMG_BACK_CANDIDATES  = ['assets/back.jpg','back.jpg','assets/back.png','back.png'];
+
+    const ROWS = 8, COLS = 14;      // ブロック数
+    const BRICK_MARGIN = 6;         // 各ブロック間の隙間（見た目には使わず、当たり判定/破壊領域として）
+    const PADDLE_W = 120, PADDLE_H = 16;
+    const BALL_R = 7;
+    const SPEED_BASE = 340;         // 初速
+    const SPEED_GAIN = 1.015;       // 破壊時にわずかに加速
+    const LIVES_INIT = 3;
+
+    // ====== DOM ======
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const livesEl = document.getElementById('lives');
+    const startOv = document.getElementById('start');
+    const overOv = document.getElementById('over');
+    const startBtn = document.getElementById('startBtn');
+    const againBtn = document.getElementById('againBtn');
+    const overTitle = document.getElementById('overTitle');
+    const finalScoreEl = document.getElementById('finalScore');
+
+    // ====== Canvas sizing ======
+    let dpr=1, W=0, H=0; // CSSピクセル基準
+    function resize(){
+      dpr = window.devicePixelRatio || 1;
+      const cssW = Math.max(360, window.innerWidth);
+      const cssH = Math.max(520, window.innerHeight);
+      canvas.width = Math.floor(cssW * dpr);
+      canvas.height = Math.floor(cssH * dpr);
+      ctx.setTransform(dpr,0,0,dpr,0,0); // 描画はCSSピクセル基準
+      W = cssW; H = cssH;
+      computeLayout();
+      // 画像のカバーフィットを更新
+      if(frontImg.complete && backImg.complete){
+        buildFrontMosaic();
+      }
+    }
+    window.addEventListener('resize', resize);
+
+    // ====== Image loading ======
+    function loadImageFromList(list){
+      return new Promise((resolve)=>{
+        let i=0; const img = new Image();
+        img.onload = ()=> resolve(img);
+        function tryNext(){
+          if(i>=list.length){ resolve(img); return; }
+          img.src = list[i++]+`?v=${Date.now()}`; // cache-bust for GH Pages updates
+        }
+        img.onerror = tryNext; tryNext();
+      });
+    }
+    let frontImg = new Image(), backImg = new Image();
+
+    // ====== Helpers ======
+    function drawCover(destCtx, img, dx, dy, dw, dh){
+      if(!img || !img.width || !img.height){
+        // placeholder grid
+        destCtx.fillStyle = '#10141d'; destCtx.fillRect(dx,dy,dw,dh);
+        destCtx.fillStyle = '#1b2230';
+        for(let y=0;y<dh;y+=24){ destCtx.fillRect(dx, dy+y, dw, 1); }
+        for(let x=0;x<dw;x+=24){ destCtx.fillRect(dx+x, dy, 1, dh); }
+        destCtx.fillStyle = '#556'; destCtx.fillText('画像が見つかりません: assets/front.jpg / assets/back.jpg', dx+12, dy+24);
+        return {sx:0,sy:0,sw:img.width||dw,sh:img.height||dh, x:dx, y:dy, w:dw, h:dh};
+      }
+      const sw = img.width, sh = img.height;
+      const scale = Math.max(dw/sw, dh/sh);
+      const w = sw*scale, h = sh*scale;
+      const x = dx + (dw - w)/2; const y = dy + (dh - h)/2;
+      destCtx.drawImage(img, x, y, w, h);
+      return {x, y, w, h, scale};
+    }
+
+    // front画像をキャンバスと同サイズに“カバー描画”したモザイクとして保持
+    let mosaicCanvas = document.createElement('canvas');
+    let mosaicCtx = mosaicCanvas.getContext('2d');
+    function buildFrontMosaic(){
+      mosaicCanvas.width = Math.floor(W*dpr);
+      mosaicCanvas.height = Math.floor(H*dpr);
+      mosaicCtx.setTransform(dpr,0,0,dpr,0,0);
+      mosaicCtx.clearRect(0,0,W,H);
+      drawCover(mosaicCtx, frontImg, 0,0,W,H);
+    }
+
+    // ====== Level layout ======
+    const bricks = []; // {x,y,w,h, alive}
+    let bricksAlive = 0;
+    let grid = {x:0,y:0,w:0,h:0,bw:0,bh:0};
+    function computeLayout(){
+      const marginSide = 24, marginTop = 80;
+      const areaW = W - marginSide*2;
+      const areaH = Math.min(H*0.45, 340);
+      const bw = (areaW - (COLS-1)*BRICK_MARGIN) / COLS;
+      const bh = (areaH - (ROWS-1)*BRICK_MARGIN) / ROWS;
+      grid = {x: (W-areaW)/2, y: marginTop, w: areaW, h: areaH, bw, bh};
+      if(bricks.length===0){
+        for(let r=0;r<ROWS;r++){
+          for(let c=0;c<COLS;c++){
+            bricks.push({x:0,y:0,w:bw,h:bh,alive:true});
+          }
+        }
+      }
+      // 位置を更新
+      let i=0;
+      for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+          const x = grid.x + c*(bw+BRICK_MARGIN);
+          const y = grid.y + r*(bh+BRICK_MARGIN);
+          bricks[i].x=x; bricks[i].y=y; bricks[i].w=bw; bricks[i].h=bh; i++;
+        }
+      }
+    }
+
+    // ====== Game state ======
+    const paddle = {x:0,y:0,w:PADDLE_W,h:PADDLE_H};
+    const ball = {x:0,y:0,vx:0,vy:0,r:BALL_R, stuck:true, speed:SPEED_BASE};
+    let score = 0, lives = LIVES_INIT;
+    let running = false;
+
+    function resetGame(){
+      score = 0; lives = LIVES_INIT; scoreEl.textContent=score; livesEl.textContent=lives;
+      for(const b of bricks){ b.alive=true; }
+      bricksAlive = bricks.length;
+      ball.speed = SPEED_BASE; placePaddle(); placeBallOnPaddle();
+    }
+
+    function placePaddle(){
+      paddle.w = PADDLE_W; paddle.h=PADDLE_H; paddle.x = (W - paddle.w)/2; paddle.y = Math.min(H-60, grid.y + grid.h + 80);
+    }
+    function placeBallOnPaddle(){ ball.stuck=true; ball.x = paddle.x + paddle.w/2; ball.y = paddle.y - ball.r - 1; ball.vx=0; ball.vy=0; }
+
+    function launchBall(){ if(!ball.stuck) return; ball.stuck=false; const ang = -Math.PI*0.4 + (Math.random()*0.2-0.1); ball.vx = Math.cos(ang)*ball.speed; ball.vy = Math.sin(ang)*ball.speed; }
+
+    // ====== Input ======
+    function setPaddleByPointer(ev){ const rect = canvas.getBoundingClientRect(); const px = (ev.clientX - rect.left); paddle.x = Math.max(8, Math.min(W - paddle.w - 8, px - paddle.w/2)); if(ball.stuck) { ball.x = paddle.x + paddle.w/2; ball.y = paddle.y - ball.r - 1; } }
+    canvas.addEventListener('pointerdown', (e)=>{ setPaddleByPointer(e); if(running) launchBall(); });
+    canvas.addEventListener('pointermove', (e)=>{ if(e.pressure>0 || e.buttons>0) setPaddleByPointer(e); else setPaddleByPointer(e); });
+    window.addEventListener('keydown', (e)=>{ if(e.code==='Space'){ e.preventDefault(); if(running) launchBall(); }});
+
+    // ====== Physics ======
+    function step(dt){
+      if(ball.stuck) return;
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+
+      // 壁反射
+      if(ball.x - ball.r < 0){ ball.x = ball.r; ball.vx = Math.abs(ball.vx); }
+      if(ball.x + ball.r > W){ ball.x = W - ball.r; ball.vx = -Math.abs(ball.vx); }
+      if(ball.y - ball.r < 0){ ball.y = ball.r; ball.vy = Math.abs(ball.vy); }
+
+      // パドル衝突
+      if(circleRectOverlap(ball.x,ball.y,ball.r, paddle.x,paddle.y,paddle.w,paddle.h) && ball.vy>0){
+        // どの位置で当たったかで角度を変える
+        const t = ((ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2)); // -1..1
+        const ang = (-75 * Math.PI/180) * (1 - t)/2 + (75 * Math.PI/180) * (1 + t)/2; // -75..+75 deg from vertical
+        const sp = Math.min(820, Math.hypot(ball.vx, ball.vy) * 1.02);
+        ball.vx = sp * Math.sin(ang);
+        ball.vy = -sp * Math.cos(ang);
+        // パドル上に押し戻し
+        ball.y = paddle.y - ball.r - 0.1;
+      }
+
+      // ブロック衝突（簡易最適化: AABBで粗判定 → 極小反射）
+      for(let i=0;i<bricks.length;i++){
+        const b = bricks[i]; if(!b.alive) continue;
+        if(circleRectOverlap(ball.x,ball.y,ball.r, b.x,b.y,b.w,b.h)){
+          b.alive = false; bricksAlive--; score += 10; scoreEl.textContent = score; ball.speed *= SPEED_GAIN;
+          // 反射方向: 衝突前の位置から面を推定
+          const prevX = ball.x - ball.vx*dt, prevY = ball.y - ball.vy*dt;
+          const fromLeft = prevX < b.x, fromRight = prevX > b.x + b.w, fromTop = prevY < b.y, fromBottom = prevY > b.y + b.h;
+          if((fromLeft && !fromTop && !fromBottom) || (fromRight && !fromTop && !fromBottom)) ball.vx *= -1; else ball.vy *= -1;
+          break; // 1フレーム1破壊
+        }
+      }
+
+      // 落下
+      if(ball.y - ball.r > H){
+        lives--; livesEl.textContent = lives; if(lives<=0){ end(false); } else { placePaddle(); placeBallOnPaddle(); }
+      }
+
+      // クリア
+      if(bricksAlive<=0){ end(true); }
+    }
+
+    function circleRectOverlap(cx,cy,r, rx,ry,rw,rh){
+      const nx = Math.max(rx, Math.min(cx, rx+rw));
+      const ny = Math.max(ry, Math.min(cy, ry+rh));
+      const dx = cx - nx, dy = cy - ny; return (dx*dx + dy*dy) <= r*r;
+    }
+
+    // ====== Render ======
+    function render(){
+      // 背面画像
+      drawCover(ctx, backImg, 0,0,W,H);
+      // 前面画像（モザイク）を全面に描画
+      if(mosaicCanvas.width>0) ctx.drawImage(mosaicCanvas, 0,0, W, H);
+      else drawCover(ctx, frontImg, 0,0,W,H);
+
+      // 壊れたブロックの領域をクリアして背面を露出
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      for(const b of bricks){ if(!b.alive){ ctx.fillRect(b.x, b.y, b.w, b.h); } }
+      ctx.restore();
+
+      // パドル
+      ctx.fillStyle = 'rgba(255,255,255,.9)';
+      ctx.fillRect(paddle.x, paddle.y, paddle.w, paddle.h);
+
+      // ボール
+      ctx.beginPath(); ctx.fillStyle='#fff'; ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
+
+      // 枠（デバッグ用・非表示）
+      // ctx.strokeStyle='rgba(255,255,255,.12)'; for(const b of bricks){ ctx.strokeRect(b.x,b.y,b.w,b.h); }
+    }
+
+    // ====== Loop ======
+    let last=performance.now();
+    function frame(now){
+      const dt = Math.min(0.033, (now-last)/1000); last=now;
+      if(running){ step(dt); }
+      render();
+      requestAnimationFrame(frame);
+    }
+
+    // ====== Game flow ======
+    function start(){ hide(startOv); hide(overOv); running=true; resetGame(); }
+    function end(cleared){ running=false; finalScoreEl.textContent=score; overTitle.textContent = cleared? 'Stage Clear!' : 'Game Over'; show(overOv); }
+
+    function show(el){ el.classList.remove('hidden'); }
+    function hide(el){ el.classList.add('hidden'); }
+
+    startBtn.addEventListener('click', start);
+    againBtn.addEventListener('click', start);
+
+    // ====== Init ======
+    Promise.all([
+      loadImageFromList(IMG_FRONT_CANDIDATES).then(img=>{frontImg=img;}),
+      loadImageFromList(IMG_BACK_CANDIDATES).then(img=>{backImg=img;})
+    ]).then(()=>{
+      resize();
+      buildFrontMosaic();
+      resetGame();
+      requestAnimationFrame(frame);
+    });
+
+    window.addEventListener('resize', ()=>{ placePaddle(); if(ball.stuck) placeBallOnPaddle(); });
+
+  })();
+  </script>
+</body>
+</html>
