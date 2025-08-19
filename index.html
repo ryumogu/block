@@ -57,7 +57,7 @@
     const IMG_BACK_CANDIDATES  = ['assets/back.jpg','back.jpg','assets/back.png','back.png'];
 
     const ROWS = 8, COLS = 14;      // ブロック数
-    const BRICK_MARGIN = 6;         // 各ブロック間の隙間（見た目には使わず、当たり判定/破壊領域として）
+    const BRICK_MARGIN = 0;         // 各ブロック間の隙間（見た目には使わず、当たり判定/破壊領域として）
     const PADDLE_W = 120, PADDLE_H = 16;
     const BALL_R = 7;
     const SPEED_BASE = 340;         // 初速
@@ -127,15 +127,19 @@
       return {x, y, w, h, scale};
     }
 
+    // 乱択ヘルパー
+    const choice = arr => arr[(Math.random()*arr.length)|0];
+
     // front画像をキャンバスと同サイズに“カバー描画”したモザイクとして保持
     let mosaicCanvas = document.createElement('canvas');
     let mosaicCtx = mosaicCanvas.getContext('2d');
     function buildFrontMosaic(){
-      mosaicCanvas.width = Math.floor(W*dpr);
-      mosaicCanvas.height = Math.floor(H*dpr);
+      // front画像を「ブロック配置グリッドの範囲」にフィットさせる
+      mosaicCanvas.width = Math.floor(grid.w * dpr);
+      mosaicCanvas.height = Math.floor(grid.h * dpr);
       mosaicCtx.setTransform(dpr,0,0,dpr,0,0);
-      mosaicCtx.clearRect(0,0,W,H);
-      drawCover(mosaicCtx, frontImg, 0,0,W,H);
+      mosaicCtx.clearRect(0,0,grid.w,grid.h);
+      drawCover(mosaicCtx, frontImg, 0,0,grid.w,grid.h);
     }
 
     // ====== Level layout ======
@@ -172,10 +176,19 @@
     const ball = {x:0,y:0,vx:0,vy:0,r:BALL_R, stuck:true, speed:SPEED_BASE};
     let score = 0, lives = LIVES_INIT;
     let running = false;
+    let t = 0; // game time (s)
+    let items = []; // falling power-ups
+    const ITEM_DROP_CHANCE = 0.25, ITEM_SPEED = 180; // 25%で落ちる
+    let expandUntil = 0, slowUntil = 0;
 
     function resetGame(){
       score = 0; lives = LIVES_INIT; scoreEl.textContent=score; livesEl.textContent=lives;
       for(const b of bricks){ b.alive=true; }
+      bricksAlive = bricks.length;
+      items.length = 0; expandUntil = 0; slowUntil = 0; t = 0;
+      paddle.w = PADDLE_W;
+      ball.speed = SPEED_BASE; placePaddle(); placeBallOnPaddle();
+    }
       bricksAlive = bricks.length;
       ball.speed = SPEED_BASE; placePaddle(); placeBallOnPaddle();
     }
@@ -206,27 +219,37 @@
 
       // パドル衝突
       if(circleRectOverlap(ball.x,ball.y,ball.r, paddle.x,paddle.y,paddle.w,paddle.h) && ball.vy>0){
-        // どの位置で当たったかで角度を変える
-        const t = ((ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2)); // -1..1
-        const ang = (-75 * Math.PI/180) * (1 - t)/2 + (75 * Math.PI/180) * (1 + t)/2; // -75..+75 deg from vertical
+        const tHit = ((ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2)); // -1..1
+        const ang = (-75 * Math.PI/180) * (1 - tHit)/2 + (75 * Math.PI/180) * (1 + tHit)/2;
         const sp = Math.min(820, Math.hypot(ball.vx, ball.vy) * 1.02);
         ball.vx = sp * Math.sin(ang);
         ball.vy = -sp * Math.cos(ang);
-        // パドル上に押し戻し
         ball.y = paddle.y - ball.r - 0.1;
       }
 
-      // ブロック衝突（簡易最適化: AABBで粗判定 → 極小反射）
+      // ブロック衝突
       for(let i=0;i<bricks.length;i++){
         const b = bricks[i]; if(!b.alive) continue;
         if(circleRectOverlap(ball.x,ball.y,ball.r, b.x,b.y,b.w,b.h)){
           b.alive = false; bricksAlive--; score += 10; scoreEl.textContent = score; ball.speed *= SPEED_GAIN;
-          // 反射方向: 衝突前の位置から面を推定
+          if(Math.random() < ITEM_DROP_CHANCE){
+            const type = choice(['expand','slow','life']);
+            items.push({x: b.x + b.w/2 - 14, y: b.y + b.h/2 - 10, w:28, h:20, vy:ITEM_SPEED, type});
+          }
           const prevX = ball.x - ball.vx*dt, prevY = ball.y - ball.vy*dt;
           const fromLeft = prevX < b.x, fromRight = prevX > b.x + b.w, fromTop = prevY < b.y, fromBottom = prevY > b.y + b.h;
           if((fromLeft && !fromTop && !fromBottom) || (fromRight && !fromTop && !fromBottom)) ball.vx *= -1; else ball.vy *= -1;
-          break; // 1フレーム1破壊
+          break;
         }
+      }
+
+      // アイテム落下＆取得
+      for(let i=items.length-1;i>=0;i--){
+        const it = items[i]; it.y += it.vy*dt;
+        if(rectsOverlap(it.x,it.y,it.w,it.h, paddle.x,paddle.y,paddle.w,paddle.h)){
+          applyItem(it); items.splice(i,1); continue;
+        }
+        if(it.y > H + 40){ items.splice(i,1); }
       }
 
       // 落下
@@ -237,28 +260,72 @@
       // クリア
       if(bricksAlive<=0){ end(true); }
     }
+      if(bricksAlive<=0){ end(true); }
+    }
 
     function circleRectOverlap(cx,cy,r, rx,ry,rw,rh){
       const nx = Math.max(rx, Math.min(cx, rx+rw));
       const ny = Math.max(ry, Math.min(cy, ry+rh));
       const dx = cx - nx, dy = cy - ny; return (dx*dx + dy*dy) <= r*r;
     }
+    function rectsOverlap(ax,ay,aw,ah, bx,by,bw,bh){
+      return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+    }
+    function applyItem(it){
+      if(it.type==='expand'){
+        expandUntil = Math.max(expandUntil, t) + 8; // 8秒
+        paddle.w = PADDLE_W + 80;
+      } else if(it.type==='slow'){
+        slowUntil = Math.max(slowUntil, t) + 6; // 6秒
+        ball.vx *= 0.75; ball.vy *= 0.75;
+      } else if(it.type==='life'){
+        lives++; livesEl.textContent=lives;
+      }
+    }
 
     // ====== Render ======
     function render(){
-      // 背面画像（常に全画面）
-      drawCover(ctx, backImg, 0,0,W,H);
+      // 背面画像（ブロックグリッドの範囲にのみ描画）
+      drawCover(ctx, backImg, grid.x, grid.y, grid.w, grid.h);
 
-      // 前面画像は「生きているブロック」の形でだけ描画（= マスク）。
-      // これでブロック間の隙間や壊れた領域では背面が見える。
+      // 前面画像：生きているブロックの形にクリップして、その中だけ描画
       if(mosaicCanvas.width>0){
         ctx.save();
         ctx.beginPath();
         for(const b of bricks){ if(b.alive){ ctx.rect(b.x, b.y, b.w, b.h); } }
         ctx.clip();
-        ctx.drawImage(mosaicCanvas, 0,0, W, H);
+        ctx.drawImage(mosaicCanvas, grid.x, grid.y);
         ctx.restore();
       } else {
+        // 画像未読込の間のプレースホルダ
+        ctx.save();
+        ctx.beginPath();
+        for(const b of bricks){ if(b.alive){ ctx.rect(b.x, b.y, b.w, b.h); } }
+        ctx.clip();
+        drawCover(ctx, frontImg, grid.x, grid.y, grid.w, grid.h);
+        ctx.restore();
+      }
+
+      // パワーアップアイテム
+      for(const it of items){
+        ctx.save();
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = it.type==='expand' ? '#79d3ff' : (it.type==='slow' ? '#ffe066' : '#7cff7a');
+        ctx.fillRect(it.x, it.y, it.w, it.h);
+        ctx.fillStyle = '#0b0e14';
+        ctx.font = 'bold 12px system-ui';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(it.type==='expand'?'E':(it.type==='slow'?'S':'+1'), it.x+it.w/2, it.y+it.h/2);
+        ctx.restore();
+      }
+
+      // パドル
+      ctx.fillStyle = 'rgba(255,255,255,.9)';
+      ctx.fillRect(paddle.x, paddle.y, paddle.w, paddle.h);
+
+      // ボール
+      ctx.beginPath(); ctx.fillStyle='#fff'; ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill();
+    } else {
         drawCover(ctx, frontImg, 0,0, W, H);
       }
 
@@ -274,9 +341,14 @@
     let last=performance.now();
     function frame(now){
       const dt = Math.min(0.033, (now-last)/1000); last=now;
-      if(running){ step(dt); }
+      if(running){ t += dt; step(dt); updateEffects(); }
       render();
       requestAnimationFrame(frame);
+    }
+
+    function updateEffects(){
+      if(expandUntil>0 && t>expandUntil && paddle.w!==PADDLE_W){ paddle.w = PADDLE_W; }
+      // slow は徐々に速度が戻る想定のため明示的な解除処理は行わない
     }
 
     // ====== Game flow ======
